@@ -1,8 +1,5 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { ExamConfig } from "../types";
-
-const apiKey = process.env.API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
 
 // Helper to convert File to Base64
 export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
@@ -30,6 +27,7 @@ export const generateCareerImage = async (
   career: string
 ): Promise<string> => {
   try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const imagePart = await fileToGenerativePart(personImage);
     const prompt = `Đây là ảnh khuôn mặt của một người. Hãy tạo một hình ảnh thực tế chất lượng cao, ghép khuôn mặt người này vào vai một ${career} (nghề nghiệp). 
     Giữ các đặc điểm khuôn mặt dễ nhận biết. Bối cảnh phải phù hợp với nghề nghiệp. 
@@ -61,6 +59,7 @@ export const mergeTwoImages = async (
   bgImage: File
 ): Promise<string> => {
   try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const facePart = await fileToGenerativePart(faceImage);
     const bgPart = await fileToGenerativePart(bgImage);
 
@@ -84,6 +83,118 @@ export const mergeTwoImages = async (
     throw new Error("Không ghép được ảnh.");
   } catch (error) {
     console.error("Lỗi ghép ảnh:", error);
+    throw error;
+  }
+};
+
+/**
+ * Edit Image using Text Prompt (Gemini 2.5 Flash Image)
+ */
+export const editImageWithPrompt = async (
+  image: File,
+  prompt: string
+): Promise<string> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const imagePart = await fileToGenerativePart(image);
+    
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [imagePart, { text: prompt }]
+      },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+
+    throw new Error("Không chỉnh sửa được ảnh.");
+  } catch (error) {
+    console.error("Lỗi chỉnh sửa ảnh:", error);
+    throw error;
+  }
+};
+
+/**
+ * Generate High Quality Image (Gemini 3 Pro Image)
+ */
+export const generateProImage = async (
+  prompt: string,
+  size: '1K' | '2K' | '4K'
+): Promise<string> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-pro-image-preview',
+      contents: {
+        parts: [{ text: prompt }]
+      },
+      config: {
+        imageConfig: {
+          imageSize: size,
+          aspectRatio: "1:1"
+        }
+      }
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+    
+    throw new Error("Không tạo được ảnh Pro.");
+  } catch (error) {
+    console.error("Lỗi tạo ảnh Pro:", error);
+    throw error;
+  }
+};
+
+/**
+ * Generate Video from Image (Veo 3.1)
+ */
+export const generateVeoVideo = async (
+  image: File,
+  prompt: string,
+  aspectRatio: '16:9' | '9:16'
+): Promise<string> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const imagePart = await fileToGenerativePart(image);
+
+    let operation = await ai.models.generateVideos({
+      model: 'veo-3.1-fast-generate-preview',
+      prompt: prompt || "Làm chuyển động hình ảnh này một cách tự nhiên",
+      image: {
+        imageBytes: imagePart.inlineData.data,
+        mimeType: imagePart.inlineData.mimeType,
+      },
+      config: {
+        numberOfVideos: 1,
+        resolution: '720p',
+        aspectRatio: aspectRatio
+      }
+    });
+
+    // Polling
+    while (!operation.done) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      operation = await ai.operations.getVideosOperation({operation: operation});
+    }
+
+    const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+    if (!videoUri) throw new Error("Không tìm thấy URI video.");
+
+    // The response body contains the MP4 bytes. Must append API key.
+    const videoResponse = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+    const blob = await videoResponse.blob();
+    return URL.createObjectURL(blob);
+
+  } catch (error) {
+    console.error("Lỗi tạo video Veo:", error);
     throw error;
   }
 };
@@ -146,12 +257,9 @@ const buildExamPrompt = (config: ExamConfig, isOnline: boolean): string => {
 
 export const generateExamDoc = async (config: ExamConfig): Promise<string> => {
   try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const parts: any[] = [{ text: buildExamPrompt(config, false) }];
     
-    // Add files if they exist (assuming they are images or text files we can read)
-    // Note: Gemini API mainly accepts images/PDFs/Videos for multimodal. 
-    // For DOCX/XLSX, in a real app we'd parse text. Here we assume user might upload images of the matrix.
-    // If text files, we'd read text. For simplicity in this demo, we assume they act as context prompts or are skipped if not image/pdf.
     if (config.matrixFile && config.matrixFile.type.startsWith('image/')) {
        parts.push(await fileToGenerativePart(config.matrixFile));
     }
@@ -173,9 +281,9 @@ export const generateExamDoc = async (config: ExamConfig): Promise<string> => {
 
 export const generateOnlineQuiz = async (config: ExamConfig): Promise<any> => {
   try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const parts: any[] = [{ text: buildExamPrompt(config, true) }];
 
-    // Similar handling for files as context
     if (config.matrixFile && config.matrixFile.type.startsWith('image/')) {
        parts.push(await fileToGenerativePart(config.matrixFile));
     }
